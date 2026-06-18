@@ -1,36 +1,83 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Cauldron
+
+Cauldron is a digital pantry app for keeping track of the ingredients in a user's kitchen. It helps users understand what they already have, what is close to expiring, and what they can cook before food goes to waste.
+
+The app can scan grocery receipts or product barcodes to extract food items, then add them to the pantry with quantities and estimated expiry dates. It also includes an AI recipe chat powered by Gemini, so users can ask for meal ideas based on specific ingredients, nutrition goals, or pantry changes.
+
+## What Cauldron Does
+
+- Tracks pantry items, quantities, storage locations, and expiry timelines.
+- Removes items automatically when their quantity reaches zero.
+- Scans receipts and barcodes from the Extract tab.
+- Confirms scanned barcode items before adding them to the pantry.
+- Suggests recipes that can be made with existing pantry ingredients.
+- Suggests a few stretch recipes that need only 1-2 extra ingredients.
+- Lets users chat with AI to add, remove, update, or clear pantry items.
+- Helps users identify ingredients to buy for nutrition or cooking goals.
+
+## Tech Stack
+
+- Next.js
+- React
+- TypeScript
+- Tailwind CSS
+- Supabase
+- Gemini API
+
+## Environment Variables
+
+Create a `.env.local` file in the project root and add:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_project_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+GEMINI_API_KEY=your_gemini_api_key
+```
+
+The `.env.local` file is ignored by Git and should not be uploaded to GitHub.
 
 ## Getting Started
 
-First, run the development server:
+Install dependencies:
+
+```bash
+npm install
+```
+
+Run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Useful Commands
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Run lint checks:
 
-## Learn More
+```bash
+npm run lint
+```
 
-To learn more about Next.js, take a look at the following resources:
+Create a production build:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+npm run build
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+Start the production build:
 
-## Deploy on Vercel
+```bash
+npm run start
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Mobile Testing
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+For camera and barcode testing on a phone, run the app locally and expose it with a secure tunnel such as ngrok:
+
+```bash
+ngrok http 3000
+```
+
+Open the generated HTTPS URL on your phone. Camera access generally requires HTTPS, so the ngrok URL is preferred for mobile barcode testing.
