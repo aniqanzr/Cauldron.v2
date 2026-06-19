@@ -36,6 +36,18 @@ GEMINI_API_KEY=your_gemini_api_key
 
 The `.env.local` file is ignored by Git and should not be uploaded to GitHub.
 
+## Supabase Setup
+
+Cauldron uses Supabase Auth for user accounts and one shared `pantry_items` table for pantry logs. Each pantry row includes a `user_id`, and Row Level Security keeps each user's pantry private.
+
+In your Supabase project, open the SQL editor and run:
+
+```sql
+-- Copy and run the contents of supabase/schema.sql
+```
+
+Then make sure email/password signups are enabled in Supabase Auth.
+
 ## Getting Started
 
 Install dependencies:
