@@ -252,10 +252,13 @@ function buildPrompt(prompt: string, pantry: ReturnType<typeof sanitizePantry>) 
     `User request: ${prompt}`,
     "",
     "Current pantry:",
-    ...pantry.map((item) => {
-      const expires = item.expiresIn === null ? "unknown expiry" : `expires in ${item.expiresIn} days`;
-      return `- ${item.name}: ${item.quantity} ${item.unit}, ${item.category}, ${item.location}, ${expires}`;
-    }),
+    ...(pantry.length > 0
+      ? pantry.map((item) => {
+          const expires =
+            item.expiresIn === null ? "unknown expiry" : `expires in ${item.expiresIn} days`;
+          return `- ${item.name}: ${item.quantity} ${item.unit}, ${item.category}, ${item.location}, ${expires}`;
+        })
+      : ["- The pantry is empty."]),
     "",
     "You are an app assistant for Cauldron. You may help with pantry management, recipe ideas, shopping suggestions, and nutrition goals.",
     "Return pantryActions only when the user clearly asks to add, remove, update, or clear pantry items. Use action type add, remove, update, or clear.",
@@ -266,6 +269,26 @@ function buildPrompt(prompt: string, pantry: ReturnType<typeof sanitizePantry>) 
     "If the user does not ask for recipes, ready and stretch may be empty arrays.",
     "Keep text concise and action-oriented.",
   ].join("\n");
+}
+
+function geminiErrorMessage(status: number, model: string) {
+  if (status === 400) {
+    return "Gemini rejected the request. Check the request format and configured model.";
+  }
+
+  if (status === 401 || status === 403) {
+    return "Gemini rejected the API key. Check GEMINI_API_KEY and its API restrictions.";
+  }
+
+  if (status === 404) {
+    return `The configured Gemini model (${model}) is unavailable.`;
+  }
+
+  if (status === 429) {
+    return "Gemini's quota or rate limit has been reached.";
+  }
+
+  return "Gemini is temporarily unavailable.";
 }
 
 export async function POST(request: Request) {
@@ -286,47 +309,59 @@ export async function POST(request: Request) {
   const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
   const pantry = sanitizePantry(Array.isArray(body.pantry) ? body.pantry : []);
 
-  if (!prompt || pantry.length === 0) {
+  if (!prompt) {
     return NextResponse.json(
-      { error: "A prompt and pantry items are required." },
+      { error: "A prompt is required." },
       { status: 400 },
     );
   }
 
-  const response = await fetch(
-    `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-goog-api-key": apiKey,
+  let response: Response;
+
+  try {
+    response = await fetch(
+      `${GEMINI_API_BASE}/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": apiKey,
+        },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [
+              {
+                text: "You are Cauldron, a concise app assistant. Return only valid JSON matching the provided schema.",
+              },
+            ],
+          },
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: buildPrompt(prompt, pantry) }],
+            },
+          ],
+          generationConfig: {
+            responseMimeType: "application/json",
+            responseSchema: assistantSchema(),
+            temperature: 0.25,
+          },
+        }),
+        signal: AbortSignal.timeout(45_000),
       },
-      body: JSON.stringify({
-        system_instruction: {
-          parts: {
-            text: "You are Cauldron, a concise app assistant. Return only valid JSON matching the provided schema.",
-          },
-        },
-        contents: [
-          {
-            role: "user",
-            parts: [{ text: buildPrompt(prompt, pantry) }],
-          },
-        ],
-        generationConfig: {
-          response_mime_type: "application/json",
-          response_schema: assistantSchema(),
-          temperature: 0.25,
-        },
-      }),
-    },
-  );
+    );
+  } catch {
+    return NextResponse.json(
+      { error: "Gemini could not be reached from the app server." },
+      { status: 502 },
+    );
+  }
 
   if (!response.ok) {
     await response.text();
     return NextResponse.json(
-      { error: "Gemini request failed." },
-      { status: response.status },
+      { error: geminiErrorMessage(response.status, model) },
+      { status: response.status === 429 ? 429 : 502 },
     );
   }
 

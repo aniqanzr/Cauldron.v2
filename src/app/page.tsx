@@ -1641,11 +1641,8 @@ export default function HomePage() {
         }),
       });
 
-      if (!response.ok) {
-        throw new Error("Gemini request failed");
-      }
-
       const data = (await response.json()) as {
+        error?: string;
         text?: string;
         ready?: AiRecommendation[];
         stretch?: AiRecommendation[];
@@ -1653,6 +1650,10 @@ export default function HomePage() {
         shoppingList?: ShoppingSuggestion[];
         nutritionNotes?: string[];
       };
+
+      if (!response.ok) {
+        throw new Error(data.error || `Gemini request failed (${response.status}).`);
+      }
 
       if (!data.text) {
         throw new Error("Gemini response did not include a reply");
@@ -1683,8 +1684,10 @@ export default function HomePage() {
             : message,
         ),
       );
-    } catch {
+    } catch (error) {
       const fallback = createLocalActionMessage(trimmedPrompt, assistantMessageId, pantryNames);
+      const reason =
+        error instanceof Error ? error.message : "Gemini could not complete the request.";
 
       applyPantryActions(fallback.pantryActions || []);
 
@@ -1695,8 +1698,8 @@ export default function HomePage() {
                 ...fallback,
                 text:
                   fallback.pantryActions && fallback.pantryActions.length > 0
-                    ? fallback.text
-                    : "Gemini is not configured or reachable yet, so here is a local pantry-first fallback with the same 3-plus-2 recipe mix.",
+                    ? `I couldn't complete this with Gemini: ${reason} I handled the pantry change locally.`
+                    : `I couldn't complete this with Gemini: ${reason} Here is a local pantry-first fallback with the same 3-plus-2 recipe mix.`,
               }
             : message,
         ),
