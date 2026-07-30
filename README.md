@@ -1,6 +1,8 @@
 # Cauldron
 
-Cauldron is a mobile-first digital pantry that helps people track food, use ingredients before they expire, and decide what to cook. Pantry data is synced to each user's private Supabase account, with a local browser copy available if cloud sync is temporarily unavailable.
+Cauldron is a mobile-first digital pantry that helps people track food, use ingredients before they expire, and decide what to cook. The idea was birthed after realising that my mom kept leaving things in our kitchen to expire, because 1. she had no idea what do with them, and 2. she just forgot that she had those ingredients.
+
+Pantry data is synced to each user's private Supabase account, with a local browser copy available if cloud sync is temporarily unavailable.
 
 ## Live Demo
 
