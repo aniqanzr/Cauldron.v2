@@ -1,25 +1,19 @@
 import type { NextConfig } from "next";
-import os, { type NetworkInterfaceInfo } from "node:os";
+import { fileURLToPath } from "node:url";
 
-function isLocalNetworkOrigin(
-  networkInterface: NetworkInterfaceInfo | undefined,
-): networkInterface is NetworkInterfaceInfo {
-  if (!networkInterface) {
-    return false;
-  }
-
-  return networkInterface.family === "IPv4" && !networkInterface.internal;
-}
-
-const localNetworkOrigins = Object.values(os.networkInterfaces())
-  .flat()
-  .filter(isLocalNetworkOrigin)
-  .map((networkInterface) => networkInterface.address);
+const projectRoot = fileURLToPath(new URL(".", import.meta.url));
 
 const nextConfig: NextConfig = {
+  devIndicators: false,
+  experimental: {
+    optimizePackageImports: ["lucide-react"],
+  },
+  turbopack: {
+    root: projectRoot,
+  },
   allowedDevOrigins: [
-    ...localNetworkOrigins,
     "*.ngrok-free.app",
+    "*.ngrok-free.dev",
     "*.ngrok.app",
     "*.ngrok.io",
   ],

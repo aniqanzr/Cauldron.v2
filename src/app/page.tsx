@@ -12,19 +12,23 @@ import {
   Flame,
   Home,
   Leaf,
+  LogOut,
   MessageCircle,
   Minus,
   PackageOpen,
   Plus,
+  RefreshCw,
   ReceiptText,
   ScanLine,
   Search,
   Send,
+  ShieldCheck,
   ShoppingBasket,
   Sparkles,
   Utensils,
   X,
 } from "lucide-react";
+import type { Session, User } from "@supabase/supabase-js";
 import {
   ChangeEvent,
   FormEvent,
@@ -35,6 +39,19 @@ import {
   useState,
 } from "react";
 
+type BarcodeNutrition = {
+  basis?: string;
+  calories?: number;
+  protein?: number;
+  carbs?: number;
+  fat?: number;
+  sugar?: number;
+  fiber?: number;
+  sodiumMg?: number;
+  nutriScore?: string;
+  servingSize?: string;
+};
+
 type PantryItem = {
   id: string;
   name: string;
@@ -42,6 +59,26 @@ type PantryItem = {
   quantity: number;
   unit: string;
   expiresIn: number;
+  location: string;
+  color: string;
+  barcode?: string;
+  brand?: string;
+  matchedBarcode?: string;
+  nutrition?: BarcodeNutrition;
+  productImageUrl?: string;
+  lookupSource?: "barcode" | "camera" | "openfoodfacts";
+  lookupStatus?: "found" | "not_found";
+  lookupMessage?: string;
+};
+
+type PantryItemRow = {
+  id: string;
+  user_id: string;
+  name: string;
+  category: string;
+  quantity: number | string;
+  unit: string;
+  expires_in: number | string;
   location: string;
   color: string;
 };
@@ -57,10 +94,17 @@ type Recipe = {
   highlight: string;
 };
 
-type AiRecommendation = Recipe & {
+type RecipeMatch = Recipe & {
   available: string[];
   missing: string[];
   match: number;
+};
+
+type AiRecommendation = RecipeMatch;
+
+type CookingRecipe = RecipeMatch & {
+  prepNotes: string[];
+  instructions: string[];
 };
 
 type PantryAction = {
@@ -118,9 +162,59 @@ type DetectedBarcodeItem = {
   quantity?: number;
   unit?: string;
   expiresIn?: number;
+  brand?: string;
+  matchedBarcode?: string;
+  nutrition?: BarcodeNutrition;
+  productImageUrl?: string;
+  lookupSource?: "barcode" | "camera" | "openfoodfacts";
+  lookupStatus?: "found" | "not_found";
+  lookupMessage?: string;
+};
+
+type DetectedReceiptItem = {
+  name: string;
+  category?: string;
+  quantity?: number;
+  unit?: string;
+  expiresIn?: number;
+};
+
+type ReceiptScanResponse = {
+  storeName?: string;
+  items?: DetectedReceiptItem[];
+  error?: string;
+};
+
+type AuthMode = "sign-in" | "sign-up";
+
+type SyncStatus = "idle" | "loading" | "saving" | "saved" | "error";
+
+type SupabasePantryError = {
+  code?: string;
+  details?: string;
+  hint?: string;
+  message?: string;
+};
+
+type AuthApiResponse = {
+  session?: Session | null;
+  user?: User | null;
+  error?: string;
+  code?: string;
+};
+
+type PantryApiResponse = {
+  items?: PantryItemRow[];
+  error?: string;
+  code?: string;
+  details?: string;
+  hint?: string;
+  message?: string;
 };
 
 type TabId = "home" | "pantry" | "scan" | "chat" | "recipes";
+
+const authSessionStorageKey = "cauldron-auth-session";
 
 const pantrySeed: PantryItem[] = [
   {
@@ -225,49 +319,6 @@ const pantrySeed: PantryItem[] = [
   },
 ];
 
-const receiptItems: PantryItem[] = [
-  {
-    id: "oat-milk",
-    name: "Oat milk",
-    category: "Dairy",
-    quantity: 1,
-    unit: "carton",
-    expiresIn: 12,
-    location: "Fridge",
-    color: "bg-teal-100 text-teal-800",
-  },
-  {
-    id: "brown-mushrooms",
-    name: "Brown mushrooms",
-    category: "Produce",
-    quantity: 250,
-    unit: "g",
-    expiresIn: 5,
-    location: "Crisper",
-    color: "bg-stone-200 text-stone-800",
-  },
-  {
-    id: "sourdough",
-    name: "Sourdough",
-    category: "Bakery",
-    quantity: 1,
-    unit: "loaf",
-    expiresIn: 4,
-    location: "Counter",
-    color: "bg-orange-100 text-orange-800",
-  },
-  {
-    id: "avocado",
-    name: "Avocado",
-    category: "Produce",
-    quantity: 2,
-    unit: "count",
-    expiresIn: 3,
-    location: "Counter",
-    color: "bg-green-100 text-green-800",
-  },
-];
-
 function createBarcodeItem(detectedItem: DetectedBarcodeItem): PantryItem {
   const barcode = detectedItem.barcode.trim();
   const compactCode = barcode.length > 4 ? barcode.slice(-4) : barcode;
@@ -283,7 +334,276 @@ function createBarcodeItem(detectedItem: DetectedBarcodeItem): PantryItem {
     expiresIn: detectedItem.expiresIn && detectedItem.expiresIn > 0 ? detectedItem.expiresIn : 14,
     location: "Pantry",
     color: colorForCategory(category),
+    barcode,
+    brand: detectedItem.brand,
+    matchedBarcode: detectedItem.matchedBarcode,
+    nutrition: detectedItem.nutrition,
+    productImageUrl: detectedItem.productImageUrl,
+    lookupSource: detectedItem.lookupSource,
+    lookupStatus: detectedItem.lookupStatus,
+    lookupMessage: detectedItem.lookupMessage,
   };
+}
+
+function createReceiptItem(detectedItem: DetectedReceiptItem, index: number): PantryItem {
+  const name = detectedItem.name.trim();
+  const category = detectedItem.category?.trim() || "Other";
+
+  return {
+    id: idFromName(`receipt-${name}-${index}`),
+    name,
+    category,
+    quantity: detectedItem.quantity && detectedItem.quantity > 0 ? detectedItem.quantity : 1,
+    unit: detectedItem.unit?.trim() || "item",
+    expiresIn: detectedItem.expiresIn && detectedItem.expiresIn > 0 ? detectedItem.expiresIn : 14,
+    location: "Pantry",
+    color: colorForCategory(category),
+  };
+}
+
+function formatNutritionNumber(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1).replace(/\.0$/, "");
+}
+
+function formatNutritionGrams(value?: number) {
+  return value === undefined ? undefined : `${formatNutritionNumber(value)}g`;
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+
+    reader.addEventListener("load", () => {
+      if (typeof reader.result === "string") {
+        resolve(reader.result);
+        return;
+      }
+
+      reject(new Error("Could not read receipt image."));
+    });
+    reader.addEventListener("error", () => reject(new Error("Could not read receipt image.")));
+    reader.readAsDataURL(file);
+  });
+}
+
+function pantryRowToItem(row: PantryItemRow): PantryItem {
+  const category = row.category || "Other";
+
+  return {
+    id: row.id,
+    name: row.name,
+    category,
+    quantity: Number(row.quantity) || 1,
+    unit: row.unit || "item",
+    expiresIn: Number(row.expires_in) || 0,
+    location: row.location || "Pantry",
+    color: row.color || colorForCategory(category),
+  };
+}
+
+function serializePantry(items: PantryItem[]) {
+  return JSON.stringify(
+    [...items]
+      .map((item) => ({
+        ...item,
+        quantity: Number(item.quantity.toFixed(2)),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id)),
+  );
+}
+
+function localPantryKey(userId: string) {
+  return `cauldron-pantry:${userId}`;
+}
+
+function normalizeStoredPantryItem(item: Partial<PantryItem>): PantryItem | null {
+  if (!item.id || !item.name) {
+    return null;
+  }
+
+  const category = item.category || "Other";
+
+  return {
+    id: item.id,
+    name: item.name,
+    category,
+    quantity: Number(item.quantity) > 0 ? Number(item.quantity) : 1,
+    unit: item.unit || "item",
+    expiresIn: Number(item.expiresIn) >= 0 ? Number(item.expiresIn) : 14,
+    location: item.location || "Pantry",
+    color: item.color || colorForCategory(category),
+    barcode: item.barcode,
+    brand: item.brand,
+    matchedBarcode: item.matchedBarcode,
+    nutrition: item.nutrition,
+    productImageUrl: item.productImageUrl,
+    lookupSource: item.lookupSource,
+    lookupStatus: item.lookupStatus,
+    lookupMessage: item.lookupMessage,
+  };
+}
+
+function loadLocalPantry(userId: string) {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const storedPantry = window.localStorage.getItem(localPantryKey(userId));
+    const parsed = storedPantry ? JSON.parse(storedPantry) : [];
+
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+
+    return parsed
+      .map((item) => normalizeStoredPantryItem(item as Partial<PantryItem>))
+      .filter((item): item is PantryItem => item !== null);
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalPantry(userId: string, items: PantryItem[]) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  window.localStorage.setItem(localPantryKey(userId), serializePantry(items));
+}
+
+function readStoredAuthSession() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const storedSession = window.localStorage.getItem(authSessionStorageKey);
+    const session = storedSession ? (JSON.parse(storedSession) as Partial<Session>) : null;
+
+    if (!session?.access_token || !session.refresh_token || !session.user?.id) {
+      return null;
+    }
+
+    return session as Session;
+  } catch {
+    return null;
+  }
+}
+
+function saveAuthSession(session: Session | null) {
+  if (typeof window === "undefined") {
+    return;
+  }
+
+  if (!session) {
+    window.localStorage.removeItem(authSessionStorageKey);
+    return;
+  }
+
+  window.localStorage.setItem(authSessionStorageKey, JSON.stringify(session));
+}
+
+function shouldRefreshSession(session: Session) {
+  if (!session.expires_at) {
+    return false;
+  }
+
+  return Date.now() / 1000 > session.expires_at - 60;
+}
+
+function authHeaders(session: Session | null): Record<string, string> {
+  return session?.access_token
+    ? {
+        Authorization: `Bearer ${session.access_token}`,
+      }
+    : {};
+}
+
+function apiErrorFromPayload(payload: unknown, fallbackMessage: string) {
+  const data =
+    payload && typeof payload === "object" ? (payload as Record<string, unknown>) : {};
+  const message =
+    typeof data.error === "string"
+      ? data.error
+      : typeof data.message === "string"
+        ? data.message
+        : fallbackMessage;
+  const error = new Error(message) as Error & SupabasePantryError;
+
+  if (typeof data.code === "string") {
+    error.code = data.code;
+  }
+
+  if (typeof data.details === "string") {
+    error.details = data.details;
+  }
+
+  if (typeof data.hint === "string") {
+    error.hint = data.hint;
+  }
+
+  return error;
+}
+
+async function apiRequest<T>(
+  path: string,
+  init: RequestInit,
+  fallbackMessage: string,
+): Promise<T> {
+  try {
+    const response = await fetch(path, init);
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      throw apiErrorFromPayload(payload, fallbackMessage);
+    }
+
+    return payload as T;
+  } catch (error) {
+    if (error instanceof TypeError && error.message.toLowerCase().includes("failed to fetch")) {
+      throw new Error(
+        `${fallbackMessage} The Cauldron app server is not reachable. Restart the Next dev server and try again.`,
+      );
+    }
+
+    throw error;
+  }
+}
+
+function pantrySyncErrorMessage(error: SupabasePantryError) {
+  const message = error.message || "Could not sync pantry";
+  const code = error.code || "";
+  const lowerMessage = message.toLowerCase();
+
+  if (code === "42P01" || code === "PGRST205" || lowerMessage.includes("does not exist")) {
+    return "Cloud pantry table is missing. Run the pantry_items setup SQL. Saved locally on this device.";
+  }
+
+  if (code === "42703" || lowerMessage.includes("column")) {
+    return `Cloud pantry table has different columns. Run the reset pantry_items SQL. Saved locally. ${message}`;
+  }
+
+  if (code === "42501" || lowerMessage.includes("row-level security") || lowerMessage.includes("permission")) {
+    return `Cloud pantry privacy rules need setup. Run the pantry_items setup SQL. Saved locally. ${message}`;
+  }
+
+  return `Cloud pantry setup needs attention. Saved locally. ${message}`;
+}
+
+async function replaceSupabasePantry(session: Session, items: PantryItem[]) {
+  await apiRequest<PantryApiResponse>(
+    "/api/pantry",
+    {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        ...authHeaders(session),
+      },
+      body: JSON.stringify({ items }),
+    },
+    "Could not save pantry.",
+  );
 }
 
 const recipes: Recipe[] = [
@@ -512,6 +832,17 @@ function createAssistantMessage(
   pantryNames: Set<string>,
   id = `assistant-${Date.now()}`,
 ): ChatMessage {
+  if (pantryNames.size === 0) {
+    return {
+      id,
+      role: "assistant",
+      text: "Your pantry is ready. Add ingredients from Scan or ask me to add items, then I can suggest recipes from what you have.",
+      ready: [],
+      stretch: [],
+      source: "local",
+    };
+  }
+
   const recommendations = buildAiRecommendations(prompt, pantryNames);
   const requestedText =
     recommendations.requestedIngredients.length > 0
@@ -527,6 +858,102 @@ function createAssistantMessage(
     ready: recommendations.ready,
     stretch: recommendations.stretch,
     source: "local",
+  };
+}
+
+function buildCookingRecipe(recipe: RecipeMatch): CookingRecipe {
+  const formattedIngredients = recipe.ingredients.map(formatIngredient);
+  const prepNotes = [
+    `Set out ${formattedIngredients.slice(0, 4).join(", ")}${formattedIngredients.length > 4 ? ", and the rest" : ""}.`,
+    recipe.missing.length > 0
+      ? `Pick up ${recipe.missing.map(formatIngredient).join(", ")} before cooking.`
+      : "You have everything needed in your pantry.",
+    `Plan for ${recipe.time.toLowerCase()} of cooking.`,
+  ];
+  const recipeInstructions: Record<string, string[]> = {
+    frittata: [
+      "Whisk the eggs with a splash of milk, salt, and pepper.",
+      "Soften the spinach and cherry tomatoes in an oven-safe pan with a little oil.",
+      "Pour in the egg mixture and cook gently until the edges start to set.",
+      "Finish under the grill or with a lid until the center is just set.",
+      "Rest for 2 minutes, then slice and serve warm.",
+    ],
+    "rice-bowl": [
+      "Start the rice so it can steam while the chicken cooks.",
+      "Season chicken thighs with salt, pepper, and minced garlic.",
+      "Sear the chicken until browned, then cover and cook through.",
+      "Slice the chicken and spoon it over rice with any pan juices.",
+      "Add lime or cucumber if using, then serve immediately.",
+    ],
+    "yogurt-pasta": [
+      "Boil pasta in salted water until just tender.",
+      "Warm garlic and cherry tomatoes in a pan until the tomatoes soften.",
+      "Whisk Greek yogurt with a splash of pasta water to make a smooth sauce.",
+      "Toss pasta through the tomatoes, then fold in the yogurt sauce off the heat.",
+      "Season generously and finish with parmesan if using.",
+    ],
+    curry: [
+      "Cook the rice first and keep it covered.",
+      "Warm garlic in oil until fragrant.",
+      "Add chickpeas and a splash of water, then simmer until hot.",
+      "Stir in curry paste or pantry spices if using.",
+      "Serve the chickpeas over rice with any fresh toppings you have.",
+    ],
+    "tomato-chickpea-pasta": [
+      "Boil pasta in salted water and reserve a small cup of cooking water.",
+      "Cook garlic and cherry tomatoes until jammy.",
+      "Add chickpeas and warm them through.",
+      "Toss in pasta with enough cooking water to coat everything.",
+      "Season and serve with olive oil or cheese if available.",
+    ],
+    "yogurt-egg-bowl": [
+      "Cook rice or warm leftover rice.",
+      "Boil eggs until jammy, then cool briefly and peel.",
+      "Stir garlic, salt, and pepper into Greek yogurt.",
+      "Spoon yogurt over rice and top with halved eggs.",
+      "Finish with herbs, chili oil, or any crunchy pantry topping.",
+    ],
+    "chicken-yogurt-flatbreads": [
+      "Season chicken with garlic, salt, and pepper.",
+      "Cook chicken until browned and cooked through, then slice.",
+      "Stir Greek yogurt with garlic and a pinch of salt for sauce.",
+      "Warm flatbreads and layer with chicken, yogurt sauce, and cucumber.",
+      "Fold and serve while warm.",
+    ],
+    "tomato-shakshuka": [
+      "Cook garlic and cherry tomatoes until saucy.",
+      "Stir in paprika with salt and pepper.",
+      "Make small wells in the sauce and crack in the eggs.",
+      "Cover and cook until the whites are set and yolks are still soft.",
+      "Serve straight from the pan.",
+    ],
+    "coconut-chickpea-curry": [
+      "Start rice and keep it covered once cooked.",
+      "Cook garlic and curry paste in oil until fragrant.",
+      "Add chickpeas and coconut milk, then simmer until thickened.",
+      "Taste and adjust salt, pepper, and acidity.",
+      "Serve over rice.",
+    ],
+    "spinach-feta-pasta": [
+      "Boil pasta in salted water and reserve some pasta water.",
+      "Cook garlic in oil, then wilt the spinach.",
+      "Toss pasta through the spinach with a splash of pasta water.",
+      "Crumble in feta and stir until lightly creamy.",
+      "Season and serve hot.",
+    ],
+  };
+  const fallbackInstructions = [
+    `Prep ${formattedIngredients.slice(0, 3).join(", ")}${formattedIngredients.length > 3 ? ", and the remaining ingredients" : ""}.`,
+    "Start with the ingredient that takes longest to cook, then build the rest around it.",
+    "Cook aromatics or firm ingredients first, then add softer pantry items near the end.",
+    "Taste and adjust salt, acidity, and texture before serving.",
+    `Serve as a ${recipe.style.toLowerCase()} while it is fresh.`,
+  ];
+
+  return {
+    ...recipe,
+    prepNotes,
+    instructions: recipeInstructions[recipe.id] || fallbackInstructions,
   };
 }
 
@@ -587,23 +1014,35 @@ function createLocalActionMessage(prompt: string, id: string, pantryNames: Set<s
 }
 
 export default function HomePage() {
+  const [user, setUser] = useState<User | null>(null);
+  const [authSession, setAuthSession] = useState<Session | null>(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authLoading, setAuthLoading] = useState(false);
+  const [authError, setAuthError] = useState("");
+  const [authNotice, setAuthNotice] = useState("");
   const [activeTab, setActiveTab] = useState<TabId>("home");
-  const [pantry, setPantry] = useState<PantryItem[]>(pantrySeed);
+  const [pantry, setPantry] = useState<PantryItem[]>([]);
+  const [pantryLoaded, setPantryLoaded] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<SyncStatus>("idle");
+  const [syncMessage, setSyncMessage] = useState("");
   const [query, setQuery] = useState("");
-  const [chatInput, setChatInput] = useState("Use eggs, spinach, and rice");
+  const [chatInput, setChatInput] = useState("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>(() => [
     createAssistantMessage(
       "Use eggs, spinach, and rice",
-      new Set(pantrySeed.map((item) => normalized(item.name))),
+      new Set<string>(),
       "assistant-initial",
     ),
   ]);
-  const [receiptName, setReceiptName] = useState("Woolworths receipt.jpg");
-  const [scanItems, setScanItems] = useState<PantryItem[]>(receiptItems);
+  const [receiptName, setReceiptName] = useState("Upload a receipt");
+  const [scanItems, setScanItems] = useState<PantryItem[]>([]);
+  const [scanError, setScanError] = useState("");
   const [scannedBarcode, setScannedBarcode] = useState("");
+  const [selectedCookingRecipe, setSelectedCookingRecipe] = useState<CookingRecipe | null>(null);
   const [scanComplete, setScanComplete] = useState(true);
   const [receiptAdded, setReceiptAdded] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
+  const lastSavedPantryRef = useRef("");
 
   const pantryNames = useMemo(
     () => new Set(pantry.map((item) => normalized(item.name))),
@@ -652,6 +1091,162 @@ export default function HomePage() {
   );
 
   useEffect(() => {
+    let isMounted = true;
+
+    async function restoreSession() {
+      const storedSession = readStoredAuthSession();
+
+      if (!storedSession) {
+        setAuthReady(true);
+        return;
+      }
+
+      if (!shouldRefreshSession(storedSession)) {
+        setAuthSession(storedSession);
+        setUser(storedSession.user);
+        setAuthReady(true);
+        return;
+      }
+
+      try {
+        const data = await apiRequest<AuthApiResponse>(
+          "/api/auth",
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              action: "refresh",
+              refreshToken: storedSession.refresh_token,
+            }),
+          },
+          "Could not restore your session.",
+        );
+
+        if (!isMounted) {
+          return;
+        }
+
+        if (data.session) {
+          saveAuthSession(data.session);
+          setAuthSession(data.session);
+          setUser(data.session.user);
+        } else {
+          saveAuthSession(null);
+        }
+      } catch (error) {
+        if (!isMounted) {
+          return;
+        }
+
+        saveAuthSession(null);
+        setAuthError(error instanceof Error ? error.message : "Please sign in again.");
+      } finally {
+        if (isMounted) {
+          setAuthReady(true);
+        }
+      }
+    }
+
+    restoreSession();
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let isActive = true;
+
+    if (!user || !authSession) {
+      lastSavedPantryRef.current = "";
+      return;
+    }
+
+    const userId = user.id;
+
+    async function loadUserPantry() {
+      setPantryLoaded(false);
+      setSyncStatus("loading");
+      setSyncMessage("Loading pantry");
+      const localPantry = loadLocalPantry(userId);
+
+      let response: PantryApiResponse;
+
+      try {
+        response = await apiRequest<PantryApiResponse>(
+          "/api/pantry",
+          {
+            headers: authHeaders(authSession),
+          },
+          "Could not load pantry.",
+        );
+      } catch (error) {
+        if (!isActive) {
+          return;
+        }
+
+        lastSavedPantryRef.current = serializePantry(localPantry);
+        setPantry(localPantry);
+        setPantryLoaded(true);
+        setSyncStatus("error");
+        setSyncMessage(pantrySyncErrorMessage(error as SupabasePantryError));
+        return;
+      }
+
+      if (!isActive) {
+        return;
+      }
+
+      const cloudPantry = (response.items || []).map((row) => pantryRowToItem(row));
+      const nextPantry = cloudPantry.length > 0 ? cloudPantry : localPantry;
+      lastSavedPantryRef.current = serializePantry(cloudPantry);
+      setPantry(nextPantry);
+      setPantryLoaded(true);
+      setSyncStatus("saved");
+      setSyncMessage(cloudPantry.length > 0 ? "Pantry synced" : "Local pantry ready");
+    }
+
+    loadUserPantry();
+
+    return () => {
+      isActive = false;
+    };
+  }, [authSession, user]);
+
+  useEffect(() => {
+    if (!user || !authSession || !pantryLoaded) {
+      return;
+    }
+
+    const nextSavedPantry = serializePantry(pantry);
+    saveLocalPantry(user.id, pantry);
+
+    if (nextSavedPantry === lastSavedPantryRef.current) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      setSyncStatus("saving");
+      setSyncMessage("Saving pantry");
+
+      replaceSupabasePantry(authSession, pantry)
+        .then(() => {
+          lastSavedPantryRef.current = nextSavedPantry;
+          setSyncStatus("saved");
+          setSyncMessage("Pantry synced");
+        })
+        .catch((error: Error) => {
+          setSyncStatus("error");
+          setSyncMessage(pantrySyncErrorMessage(error));
+        });
+    }, 450);
+
+    return () => window.clearTimeout(timeout);
+  }, [authSession, pantry, pantryLoaded, user]);
+
+  useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
       if (contentRef.current) {
         contentRef.current.scrollTop = 0;
@@ -672,6 +1267,117 @@ export default function HomePage() {
         contentRef.current.scrollTop = 0;
       }
     });
+  }
+
+  async function handleAuth(mode: AuthMode, email: string, password: string) {
+    setAuthLoading(true);
+    setAuthError("");
+    setAuthNotice("");
+
+    try {
+      const data = await apiRequest<AuthApiResponse>(
+        "/api/auth",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action: mode,
+            email,
+            password,
+            redirectTo: window.location.origin,
+          }),
+        },
+        mode === "sign-up" ? "Could not create account." : "Could not sign in.",
+      );
+
+      if (data.session) {
+        saveAuthSession(data.session);
+        setAuthSession(data.session);
+        setUser(data.session.user);
+        setAuthNotice("Signed in.");
+      } else if (mode === "sign-up") {
+        setAuthNotice("Check your email to confirm your account, then sign in.");
+      }
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "Authentication failed.");
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleResendConfirmation(email: string) {
+    const trimmedEmail = email.trim();
+
+    if (!trimmedEmail) {
+      setAuthError("Enter your email first.");
+      return;
+    }
+
+    setAuthLoading(true);
+    setAuthError("");
+    setAuthNotice("");
+
+    try {
+      await apiRequest<AuthApiResponse>(
+        "/api/auth",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            action: "resend-confirmation",
+            email: trimmedEmail,
+            redirectTo: window.location.origin,
+          }),
+        },
+        "Could not resend the confirmation email.",
+      );
+
+      setAuthNotice("Sent a fresh confirmation email for this app URL.");
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : "Could not resend confirmation.");
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function handleSignOut() {
+    setAuthLoading(true);
+
+    if (authSession) {
+      await apiRequest<AuthApiResponse>(
+        "/api/auth",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...authHeaders(authSession),
+          },
+          body: JSON.stringify({
+            action: "sign-out",
+          }),
+        },
+        "Could not sign out cleanly.",
+      ).catch(() => undefined);
+    }
+
+    saveAuthSession(null);
+    setAuthSession(null);
+    setUser(null);
+    setPantry([]);
+    setPantryLoaded(false);
+    setSyncStatus("idle");
+    setSyncMessage("");
+    lastSavedPantryRef.current = "";
+    setAuthLoading(false);
+  }
+
+  function addStarterPantry() {
+    setPantry(pantrySeed);
+    changeTab("pantry");
   }
 
   function updateQuantity(id: string, delta: number) {
@@ -772,19 +1478,47 @@ export default function HomePage() {
     });
   }
 
-  function handleReceiptUpload(event: ChangeEvent<HTMLInputElement>) {
+  async function handleReceiptUpload(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
 
     if (!file) {
       return;
     }
 
+    const input = event.currentTarget;
+
     setScannedBarcode("");
-    setScanItems(receiptItems);
     setReceiptName(file.name);
+    setScanItems([]);
+    setScanError("");
     setScanComplete(false);
     setReceiptAdded(false);
-    window.setTimeout(() => setScanComplete(true), 500);
+
+    try {
+      const imageDataUrl = await readFileAsDataUrl(file);
+      const response = await fetch("/api/receipt-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ imageDataUrl }),
+      });
+      const data = (await response.json()) as ReceiptScanResponse;
+
+      if (!response.ok || !Array.isArray(data.items) || data.items.length === 0) {
+        throw new Error(data.error || "No grocery items were found on this receipt.");
+      }
+
+      setReceiptName(data.storeName?.trim() || file.name);
+      setScanItems(
+        data.items
+          .filter((item) => typeof item.name === "string" && item.name.trim())
+          .map(createReceiptItem),
+      );
+    } catch (error) {
+      setScanError(error instanceof Error ? error.message : "Could not read this receipt.");
+    } finally {
+      setScanComplete(true);
+      input.value = "";
+    }
   }
 
   function handleBarcodeDetected(detectedItem: DetectedBarcodeItem) {
@@ -795,9 +1529,15 @@ export default function HomePage() {
     }
 
     setScannedBarcode(barcode);
+    setScanError("");
     setReceiptName(detectedItem.productName?.trim() || `Barcode ${barcode}`);
     setScanItems([createBarcodeItem(detectedItem)]);
     setScanComplete(true);
+    setReceiptAdded(false);
+  }
+
+  function removeScanItem(itemId: string) {
+    setScanItems((items) => items.filter((item) => item.id !== itemId));
     setReceiptAdded(false);
   }
 
@@ -969,6 +1709,36 @@ export default function HomePage() {
     askAi(chatInput);
   }
 
+  function startCooking(recipe: RecipeMatch) {
+    setSelectedCookingRecipe(buildCookingRecipe(recipe));
+    changeTab("recipes");
+  }
+
+  if (!authReady) {
+    return <LoadingScreen />;
+  }
+
+  if (!user) {
+    return (
+      <AuthScreen
+        error={authError}
+        loading={authLoading}
+        notice={authNotice}
+        onResendConfirmation={handleResendConfirmation}
+        onSubmit={handleAuth}
+      />
+    );
+  }
+
+  const syncLabel =
+    syncStatus === "loading"
+      ? "Loading pantry"
+      : syncStatus === "saving"
+        ? "Saving pantry"
+        : syncStatus === "error"
+          ? "Sync needs setup"
+          : user.email || "Private pantry";
+
   return (
     <main className="min-h-dvh bg-[#dfe8e2] px-4 py-5 text-[#18211b] sm:px-6 lg:px-10">
       <div className="mx-auto flex min-h-[calc(100dvh-2.5rem)] w-full max-w-6xl items-center justify-center">
@@ -980,7 +1750,7 @@ export default function HomePage() {
           <div className="flex items-center justify-between px-5 pb-3 pt-12">
             <div>
               <p className="text-xs font-semibold uppercase tracking-[0.18em] text-[#5d6b61]">
-                Tuesday, Jun 2
+                {syncLabel}
               </p>
               <h1 className="text-3xl font-bold tracking-normal text-[#111713]">
                 Cauldron
@@ -988,10 +1758,11 @@ export default function HomePage() {
             </div>
             <button
               className="grid h-11 w-11 place-items-center rounded-full bg-white text-[#263129] shadow-sm ring-1 ring-black/5"
-              aria-label="Open expiry alerts"
-              onClick={() => changeTab("home")}
+              aria-label="Sign out"
+              disabled={authLoading}
+              onClick={handleSignOut}
             >
-              <Bell size={20} />
+              <LogOut size={19} />
             </button>
           </div>
 
@@ -1013,8 +1784,11 @@ export default function HomePage() {
             {activeTab === "pantry" && (
               <PantryScreen
                 items={filteredPantry}
+                loading={syncStatus === "loading"}
                 query={query}
+                syncError={syncStatus === "error" ? syncMessage : ""}
                 totalCount={pantry.length}
+                onAddStarterPantry={addStarterPantry}
                 onQueryChange={setQuery}
                 onQuantityChange={updateQuantity}
                 onQuantitySet={setQuantity}
@@ -1024,12 +1798,14 @@ export default function HomePage() {
             {activeTab === "scan" && (
               <ScanScreen
                 receiptName={receiptName}
+                scanError={scanError}
                 scanItems={scanItems}
                 scanComplete={scanComplete}
                 receiptAdded={receiptAdded}
                 scannedBarcode={scannedBarcode}
                 onUpload={handleReceiptUpload}
                 onBarcodeDetected={handleBarcodeDetected}
+                onRemoveScanItem={removeScanItem}
                 onAddReceipt={addReceiptItems}
               />
             )}
@@ -1039,13 +1815,20 @@ export default function HomePage() {
                 input={chatInput}
                 messages={chatMessages}
                 pantryCount={pantry.length}
+                onCookRecipe={startCooking}
                 onInputChange={setChatInput}
                 onSubmit={handleChatSubmit}
                 onPromptSelect={askAi}
               />
             )}
 
-            {activeTab === "recipes" && <RecipeScreen recipeMatches={recipeMatches} />}
+            {activeTab === "recipes" && (
+              <RecipeScreen
+                recipeMatches={recipeMatches}
+                selectedRecipe={selectedCookingRecipe}
+                onCookRecipe={startCooking}
+              />
+            )}
           </div>
 
           <nav className="absolute inset-x-0 bottom-0 z-20 border-t border-black/5 bg-white/95 px-5 pb-5 pt-3 backdrop-blur">
@@ -1071,6 +1854,159 @@ export default function HomePage() {
               })}
             </div>
           </nav>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function LoadingScreen() {
+  return (
+    <main className="min-h-dvh bg-[#dfe8e2] px-4 py-5 text-[#18211b] sm:px-6 lg:px-10">
+      <div className="mx-auto flex min-h-[calc(100dvh-2.5rem)] w-full max-w-6xl items-center justify-center">
+        <section className="relative grid h-[min(900px,calc(100dvh-2.5rem))] w-full max-w-[430px] place-items-center overflow-hidden rounded-[38px] border border-white/70 bg-[#f8faf6] shadow-2xl shadow-emerald-950/20 sm:h-[860px]">
+          <div className="text-center">
+            <span className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-[#173b2a] text-white">
+              <RefreshCw size={24} />
+            </span>
+            <p className="mt-4 text-sm font-bold text-[#5d6b61]">Loading Cauldron</p>
+          </div>
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function AuthScreen({
+  error,
+  loading,
+  notice,
+  onResendConfirmation,
+  onSubmit,
+}: {
+  error: string;
+  loading: boolean;
+  notice: string;
+  onResendConfirmation: (email: string) => void;
+  onSubmit: (mode: AuthMode, email: string, password: string) => void;
+}) {
+  const [mode, setMode] = useState<AuthMode>("sign-in");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const isSignUp = mode === "sign-up";
+
+  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    onSubmit(mode, email.trim(), password);
+  }
+
+  return (
+    <main className="min-h-dvh bg-[#dfe8e2] px-4 py-5 text-[#18211b] sm:px-6 lg:px-10">
+      <div className="mx-auto flex min-h-[calc(100dvh-2.5rem)] w-full max-w-6xl items-center justify-center">
+        <section className="relative flex h-[min(900px,calc(100dvh-2.5rem))] w-full max-w-[430px] flex-col overflow-hidden rounded-[38px] border border-white/70 bg-[#f8faf6] shadow-2xl shadow-emerald-950/20 sm:h-[860px]">
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-30 h-10 bg-[#f8faf6]/95">
+            <div className="mx-auto mt-2 h-5 w-32 rounded-full bg-[#151916]" />
+          </div>
+
+          <div className="flex flex-1 flex-col justify-between px-5 pb-7 pt-14">
+            <div>
+              <span className="grid h-14 w-14 place-items-center rounded-2xl bg-[#173b2a] text-white shadow-lg shadow-emerald-950/20">
+                <ShieldCheck size={26} />
+              </span>
+              <p className="mt-6 text-xs font-bold uppercase tracking-[0.18em] text-[#657066]">
+                Private pantry
+              </p>
+              <h1 className="mt-2 text-4xl font-bold tracking-normal text-[#111713]">
+                Cauldron
+              </h1>
+              <p className="mt-3 text-sm font-semibold leading-6 text-[#657066]">
+                Sign in to keep pantry logs synced to your account.
+              </p>
+            </div>
+
+            <form className="space-y-4" onSubmit={handleSubmit}>
+              <div className="grid grid-cols-2 rounded-2xl bg-[#eef3ef] p-1">
+                <button
+                  className={`h-11 rounded-[14px] text-sm font-bold ${
+                    !isSignUp ? "bg-white text-[#173b2a] shadow-sm" : "text-[#657066]"
+                  }`}
+                  type="button"
+                  onClick={() => setMode("sign-in")}
+                >
+                  Sign in
+                </button>
+                <button
+                  className={`h-11 rounded-[14px] text-sm font-bold ${
+                    isSignUp ? "bg-white text-[#173b2a] shadow-sm" : "text-[#657066]"
+                  }`}
+                  type="button"
+                  onClick={() => setMode("sign-up")}
+                >
+                  Create
+                </button>
+              </div>
+
+              <label className="block rounded-[22px] bg-white px-4 py-3 shadow-sm ring-1 ring-black/5">
+                <span className="text-xs font-bold uppercase tracking-[0.14em] text-[#657066]">
+                  Email
+                </span>
+                <input
+                  className="mt-2 w-full bg-transparent text-base font-semibold text-[#18211b] outline-none"
+                  type="email"
+                  value={email}
+                  onChange={(event) => setEmail(event.target.value)}
+                  placeholder="you@example.com"
+                  required
+                />
+              </label>
+
+              <label className="block rounded-[22px] bg-white px-4 py-3 shadow-sm ring-1 ring-black/5">
+                <span className="text-xs font-bold uppercase tracking-[0.14em] text-[#657066]">
+                  Password
+                </span>
+                <input
+                  className="mt-2 w-full bg-transparent text-base font-semibold text-[#18211b] outline-none"
+                  type="password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  placeholder="Minimum 6 characters"
+                  minLength={6}
+                  required
+                />
+              </label>
+
+              {error && (
+                <p className="rounded-2xl bg-rose-100 px-4 py-3 text-sm font-bold text-rose-800">
+                  {error}
+                </p>
+              )}
+              {notice && (
+                <p className="rounded-2xl bg-emerald-100 px-4 py-3 text-sm font-bold text-emerald-800">
+                  {notice}
+                </p>
+              )}
+
+              <button
+                className="flex h-14 w-full items-center justify-center gap-2 rounded-2xl bg-[#173b2a] text-sm font-bold text-white shadow-sm disabled:bg-[#9da9a0]"
+                type="submit"
+                disabled={loading}
+              >
+                {loading && <RefreshCw size={17} />}
+                {isSignUp ? "Create account" : "Sign in"}
+              </button>
+
+              {isSignUp && (
+                <button
+                  className="flex h-12 w-full items-center justify-center rounded-2xl bg-white text-sm font-bold text-[#173b2a] shadow-sm ring-1 ring-black/5 disabled:text-[#9da9a0]"
+                  type="button"
+                  disabled={loading}
+                  onClick={() => onResendConfirmation(email)}
+                >
+                  Resend confirmation email
+                </button>
+              )}
+            </form>
+          </div>
         </section>
       </div>
     </main>
@@ -1167,15 +2103,21 @@ function HomeScreen({
 
 function PantryScreen({
   items,
+  loading,
   query,
+  syncError,
   totalCount,
+  onAddStarterPantry,
   onQueryChange,
   onQuantityChange,
   onQuantitySet,
 }: {
   items: PantryItem[];
+  loading: boolean;
   query: string;
+  syncError: string;
   totalCount: number;
+  onAddStarterPantry: () => void;
   onQueryChange: (value: string) => void;
   onQuantityChange: (id: string, delta: number) => void;
   onQuantitySet: (id: string, quantity: number) => void;
@@ -1201,19 +2143,53 @@ function PantryScreen({
             placeholder="Search ingredients"
           />
         </label>
+        {syncError && (
+          <p className="mt-3 rounded-2xl bg-rose-100 px-4 py-3 text-sm font-bold text-rose-800">
+            {syncError}
+          </p>
+        )}
       </section>
 
       <section>
         <SectionTitle eyebrow="Inventory" title="Tracked ingredients" />
         <div className="mt-3 space-y-3">
-          {items.map((item) => (
-            <IngredientRow
-              key={item.id}
-              item={item}
-              onQuantityChange={onQuantityChange}
-              onQuantitySet={onQuantitySet}
-            />
-          ))}
+          {loading && (
+            <div className="rounded-[24px] bg-white p-4 text-sm font-bold text-[#657066] shadow-sm ring-1 ring-black/5">
+              Loading pantry...
+            </div>
+          )}
+
+          {!loading &&
+            items.map((item) => (
+              <IngredientRow
+                key={item.id}
+                item={item}
+                onQuantityChange={onQuantityChange}
+                onQuantitySet={onQuantitySet}
+              />
+            ))}
+
+          {!loading && items.length === 0 && (
+            <div className="rounded-[24px] bg-white p-4 shadow-sm ring-1 ring-black/5">
+              <p className="text-sm font-bold">
+                {totalCount === 0 ? "No pantry items yet" : "No matching ingredients"}
+              </p>
+              <p className="mt-1 text-xs font-semibold leading-5 text-[#657066]">
+                {totalCount === 0
+                  ? "Scan groceries or ask Cauldron to add ingredients to this account."
+                  : "Try a different search term."}
+              </p>
+              {totalCount === 0 && (
+                <button
+                  className="mt-4 flex h-11 items-center justify-center gap-2 rounded-2xl bg-[#173b2a] px-4 text-sm font-bold text-white"
+                  onClick={onAddStarterPantry}
+                >
+                  <Plus size={17} />
+                  Add sample items
+                </button>
+              )}
+            </div>
+          )}
         </div>
       </section>
     </div>
@@ -1222,90 +2198,121 @@ function PantryScreen({
 
 function ScanScreen({
   receiptName,
+  scanError,
   scanItems,
   scanComplete,
   receiptAdded,
   scannedBarcode,
   onUpload,
   onBarcodeDetected,
+  onRemoveScanItem,
   onAddReceipt,
 }: {
   receiptName: string;
+  scanError: string;
   scanItems: PantryItem[];
   scanComplete: boolean;
   receiptAdded: boolean;
   scannedBarcode: string;
   onUpload: (event: ChangeEvent<HTMLInputElement>) => void;
   onBarcodeDetected: (detectedItem: DetectedBarcodeItem) => void;
+  onRemoveScanItem: (itemId: string) => void;
   onAddReceipt: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const animationFrameRef = useRef<number | null>(null);
   const detectorRef = useRef<BarcodeDetectorShape | null>(null);
-  const lastDetectedRef = useRef("");
   const [confirmationOpen, setConfirmationOpen] = useState(false);
   const [scannerStatus, setScannerStatus] = useState<
     "idle" | "starting" | "scanning" | "reviewing" | "found" | "unsupported" | "blocked" | "error"
   >("idle");
+  const isSearchingBarcode = scannerStatus === "reviewing";
   const confirmationItem = scannedBarcode ? scanItems[0] : undefined;
+  const confirmationNutritionFacts = confirmationItem?.nutrition
+    ? [
+        confirmationItem.nutrition.calories === undefined
+          ? undefined
+          : { label: "Calories", value: `${formatNutritionNumber(confirmationItem.nutrition.calories)} kcal` },
+        { label: "Protein", value: formatNutritionGrams(confirmationItem.nutrition.protein) },
+        { label: "Carbs", value: formatNutritionGrams(confirmationItem.nutrition.carbs) },
+        { label: "Fat", value: formatNutritionGrams(confirmationItem.nutrition.fat) },
+      ].filter((fact): fact is { label: string; value: string } => Boolean(fact?.value))
+    : [];
 
   useEffect(() => {
     return () => {
-      if (animationFrameRef.current) {
-        window.cancelAnimationFrame(animationFrameRef.current);
-      }
-
       streamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
 
   function stopCamera() {
-    if (animationFrameRef.current) {
-      window.cancelAnimationFrame(animationFrameRef.current);
-      animationFrameRef.current = null;
-    }
-
     streamRef.current?.getTracks().forEach((track) => track.stop());
     streamRef.current = null;
+    detectorRef.current = null;
 
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
   }
 
-  function confirmBarcodeRead(detectedItem: DetectedBarcodeItem) {
-    onBarcodeDetected(detectedItem);
-    setConfirmationOpen(true);
+  function detectedBarcodeFromResponse(
+    data: Partial<DetectedBarcodeItem>,
+    fallbackBarcode: string,
+  ): DetectedBarcodeItem {
+    return {
+      barcode: typeof data.barcode === "string" && data.barcode.trim() ? data.barcode : fallbackBarcode,
+      productName: typeof data.productName === "string" ? data.productName : undefined,
+      category: typeof data.category === "string" ? data.category : undefined,
+      quantity: typeof data.quantity === "number" ? data.quantity : undefined,
+      unit: typeof data.unit === "string" ? data.unit : undefined,
+      expiresIn: typeof data.expiresIn === "number" ? data.expiresIn : undefined,
+      brand: typeof data.brand === "string" ? data.brand : undefined,
+      matchedBarcode: typeof data.matchedBarcode === "string" ? data.matchedBarcode : undefined,
+      nutrition: data.nutrition,
+      productImageUrl: typeof data.productImageUrl === "string" ? data.productImageUrl : undefined,
+      lookupSource: data.lookupSource,
+      lookupStatus: data.lookupStatus,
+      lookupMessage: typeof data.lookupMessage === "string" ? data.lookupMessage : undefined,
+    };
   }
 
-  async function scanFrame() {
-    const video = videoRef.current;
-    const detector = detectorRef.current;
+  async function lookupBarcodeItem(detectedItem: DetectedBarcodeItem) {
+    if (detectedItem.lookupStatus === "found") {
+      return detectedItem;
+    }
 
-    if (!video || !detector || !streamRef.current) {
-      return;
+    const barcode = detectedItem.barcode.trim();
+
+    if (!barcode) {
+      return detectedItem;
     }
 
     try {
-      if (video.readyState >= 2) {
-        const barcodes = await detector.detect(video);
-        const barcode = barcodes.find((result) => result.rawValue)?.rawValue;
+      const response = await fetch("/api/barcode-scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ barcode }),
+      });
+      const data = (await response.json()) as Partial<DetectedBarcodeItem> & {
+        error?: string;
+      };
 
-        if (barcode && barcode !== lastDetectedRef.current) {
-          lastDetectedRef.current = barcode;
-          stopCamera();
-          setScannerStatus("found");
-          confirmBarcodeRead({ barcode });
-          return;
-        }
+      if (!response.ok || typeof data.barcode !== "string" || !data.barcode.trim()) {
+        return detectedItem;
       }
 
-      animationFrameRef.current = window.requestAnimationFrame(scanFrame);
+      return detectedBarcodeFromResponse(data, barcode);
     } catch {
-      stopCamera();
-      setScannerStatus("error");
+      return detectedItem;
     }
+  }
+
+  async function confirmBarcodeRead(detectedItem: DetectedBarcodeItem) {
+    setScannerStatus("reviewing");
+    const enrichedItem = await lookupBarcodeItem(detectedItem);
+    onBarcodeDetected(enrichedItem);
+    setScannerStatus("found");
+    setConfirmationOpen(true);
   }
 
   async function startCamera() {
@@ -1316,7 +2323,6 @@ function ScanScreen({
 
     try {
       setScannerStatus("starting");
-      lastDetectedRef.current = "";
       detectorRef.current = window.BarcodeDetector ? new window.BarcodeDetector() : null;
 
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -1336,10 +2342,6 @@ function ScanScreen({
       }
 
       setScannerStatus("scanning");
-
-      if (detectorRef.current) {
-        animationFrameRef.current = window.requestAnimationFrame(scanFrame);
-      }
     } catch (error) {
       stopCamera();
       setScannerStatus(error instanceof DOMException && error.name === "NotAllowedError" ? "blocked" : "error");
@@ -1356,6 +2358,19 @@ function ScanScreen({
 
     try {
       setScannerStatus("reviewing");
+      const nativeBarcode = detectorRef.current
+        ? await detectorRef.current
+            .detect(video)
+            .then((barcodes) => barcodes.find((result) => result.rawValue)?.rawValue || "")
+            .catch(() => "")
+        : "";
+
+      if (nativeBarcode) {
+        stopCamera();
+        await confirmBarcodeRead({ barcode: nativeBarcode });
+        return;
+      }
+
       const canvas = document.createElement("canvas");
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
@@ -1377,41 +2392,34 @@ function ScanScreen({
       };
 
       if (!response.ok || typeof data.barcode !== "string" || !data.barcode.trim()) {
-        setScannerStatus("error");
+        setScannerStatus("scanning");
         return;
       }
 
       stopCamera();
-      setScannerStatus("found");
-      confirmBarcodeRead({
-        barcode: data.barcode,
-        productName: typeof data.productName === "string" ? data.productName : undefined,
-        category: typeof data.category === "string" ? data.category : undefined,
-        quantity: typeof data.quantity === "number" ? data.quantity : undefined,
-        unit: typeof data.unit === "string" ? data.unit : undefined,
-        expiresIn: typeof data.expiresIn === "number" ? data.expiresIn : undefined,
-      });
+      await confirmBarcodeRead(detectedBarcodeFromResponse(data, data.barcode));
     } catch {
       setScannerStatus("error");
     }
   }
 
-  function handleExtract() {
-    if (scannerStatus === "scanning") {
-      extractCameraFrame();
-      return;
-    }
-
+  function handleBarcodeOpen() {
     if (scannerStatus !== "starting" && scannerStatus !== "reviewing") {
       startCamera();
     }
   }
 
   const scannerStatusLabel = {
-    idle: scanComplete ? "Read" : "Ready",
+    idle: scanError
+      ? "Try again"
+      : !scanComplete
+        ? "Reading receipt"
+        : scanItems.length > 0
+          ? "Read"
+          : "Ready",
     starting: "Opening camera",
-    scanning: "Point barcode",
-    reviewing: "Reading barcode",
+    scanning: "Camera ready",
+    reviewing: "Searching",
     found: "Read",
     unsupported: "Camera unavailable",
     blocked: "Camera blocked",
@@ -1457,6 +2465,7 @@ function ScanScreen({
                 </div>
                 <span
                   className={`rounded-full px-3 py-1 text-xs font-bold ${
+                    scanError ||
                     scannerStatus === "blocked" ||
                     scannerStatus === "error" ||
                     scannerStatus === "unsupported"
@@ -1475,9 +2484,34 @@ function ScanScreen({
                     muted
                     playsInline
                   />
+                  {scannerStatus === "scanning" && (
+                    <div className="flex items-center justify-between gap-3 border-t border-white/10 bg-[#18211b] p-3">
+                      <p className="text-xs font-bold text-emerald-50">
+                        Place the barcode inside the camera view.
+                      </p>
+                      <button
+                        className="flex h-10 shrink-0 items-center justify-center gap-2 rounded-2xl bg-white px-4 text-sm font-bold text-[#173b2a] shadow-sm"
+                        type="button"
+                        onClick={extractCameraFrame}
+                      >
+                        <ScanLine size={16} />
+                        Extract
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
               <div className="mt-3 space-y-2">
+                {scanError && (
+                  <p className="rounded-2xl bg-rose-50 px-3 py-2 text-xs font-bold text-rose-800">
+                    {scanError}
+                  </p>
+                )}
+                {!scanError && !scanComplete && (
+                  <p className="rounded-2xl bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-800">
+                    Reading grocery items from this receipt...
+                  </p>
+                )}
                 {scanItems.map((item) => (
                   <div key={item.id} className="flex items-center justify-between text-sm">
                     <span className="font-semibold">{item.name}</span>
@@ -1510,36 +2544,84 @@ function ScanScreen({
         </label>
         <button
           className="flex h-14 items-center justify-center gap-2 rounded-2xl bg-[#173b2a] text-sm font-bold text-white shadow-sm disabled:cursor-not-allowed disabled:bg-[#9da9a0]"
-          disabled={scannerStatus === "starting" || scannerStatus === "reviewing"}
-          onClick={handleExtract}
+          disabled={
+            scannerStatus === "starting" ||
+            scannerStatus === "scanning" ||
+            scannerStatus === "reviewing"
+          }
+          onClick={handleBarcodeOpen}
         >
           <ScanLine size={18} />
-          Extract
+          Barcode
         </button>
       </section>
+
+      {isSearchingBarcode && (
+        <div
+          aria-live="polite"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 px-4 py-5 backdrop-blur-[2px] sm:items-center"
+          role="status"
+        >
+          <div className="w-full max-w-[320px] rounded-[28px] bg-[#f8faf6] p-5 text-center text-[#18211b] shadow-2xl shadow-black/25">
+            <span className="mx-auto grid h-12 w-12 place-items-center rounded-2xl bg-[#173b2a] text-white">
+              <RefreshCw className="animate-spin" size={22} />
+            </span>
+            <h3 className="mt-4 text-xl font-bold tracking-normal">Searching</h3>
+            <p className="mt-2 text-sm font-semibold leading-5 text-[#657066]">
+              Checking Open Food Facts for this barcode.
+            </p>
+          </div>
+        </div>
+      )}
 
       <section>
         <SectionTitle eyebrow="Detected" title="Ready to add" />
         <div className="mt-3 space-y-3">
+          {scanError && (
+            <div className="rounded-[22px] bg-white p-4 text-sm font-bold text-rose-800 shadow-sm ring-1 ring-black/5">
+              {scanError}
+            </div>
+          )}
+          {!scanError && !scanComplete && (
+            <div className="rounded-[22px] bg-white p-4 text-sm font-bold text-[#657066] shadow-sm ring-1 ring-black/5">
+              Reading receipt...
+            </div>
+          )}
+          {!scanError && scanComplete && scanItems.length === 0 && (
+            <div className="rounded-[22px] bg-white p-4 text-sm font-bold text-[#657066] shadow-sm ring-1 ring-black/5">
+              Upload a receipt or scan a barcode to extract items.
+            </div>
+          )}
           {scanItems.map((item) => (
             <div
               key={item.id}
-              className="flex items-center justify-between rounded-[22px] bg-white p-4 shadow-sm ring-1 ring-black/5"
+              className="flex items-center justify-between gap-3 rounded-[22px] bg-white p-4 shadow-sm ring-1 ring-black/5"
             >
-              <div className="flex items-center gap-3">
+              <div className="flex min-w-0 items-center gap-3">
                 <span className={`grid h-10 w-10 place-items-center rounded-2xl ${item.color}`}>
                   <Leaf size={18} />
                 </span>
-                <div>
-                  <p className="text-sm font-bold">{item.name}</p>
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-bold">{item.name}</p>
                   <p className="text-xs font-semibold text-[#6c756d]">
                     Expires in {item.expiresIn} days
                   </p>
                 </div>
               </div>
-              <p className="text-sm font-bold">
-                {item.quantity} {item.unit}
-              </p>
+              <div className="flex shrink-0 items-center gap-2">
+                <p className="text-sm font-bold">
+                  {item.quantity} {item.unit}
+                </p>
+                <button
+                  aria-label={`Remove ${item.name}`}
+                  className="grid h-9 w-9 place-items-center rounded-full bg-[#eef3ef] text-[#415047] ring-1 ring-black/5 transition hover:bg-rose-50 hover:text-rose-700"
+                  title={`Remove ${item.name}`}
+                  type="button"
+                  onClick={() => onRemoveScanItem(item.id)}
+                >
+                  <X size={16} />
+                </button>
+              </div>
             </div>
           ))}
         </div>
@@ -1584,13 +2666,42 @@ function ScanScreen({
 
             <div className="mt-4 rounded-[22px] bg-white p-4 shadow-sm ring-1 ring-black/5">
               <div className="flex items-center gap-3">
-                <span className={`grid h-12 w-12 place-items-center rounded-2xl ${confirmationItem.color}`}>
-                  <PackageOpen size={20} />
+                <span
+                  className={`grid h-12 w-12 place-items-center overflow-hidden rounded-2xl ${
+                    confirmationItem.productImageUrl
+                      ? "bg-white bg-contain bg-center bg-no-repeat ring-1 ring-black/5"
+                      : confirmationItem.color
+                  }`}
+                  style={
+                    confirmationItem.productImageUrl
+                      ? { backgroundImage: `url("${confirmationItem.productImageUrl}")` }
+                      : undefined
+                  }
+                >
+                  {!confirmationItem.productImageUrl && <PackageOpen size={20} />}
                 </span>
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-bold">{confirmationItem.category}</p>
+                  <p className="truncate text-sm font-bold">
+                    {confirmationItem.brand || confirmationItem.category}
+                  </p>
                   <p className="mt-1 truncate text-xs font-semibold text-[#6c756d]">
-                    {scannedBarcode}
+                    {confirmationItem.brand
+                      ? `${confirmationItem.category} - ${scannedBarcode}`
+                      : scannedBarcode}
+                  </p>
+                  <p
+                    className={`mt-1 text-xs font-bold ${
+                      confirmationItem.lookupStatus === "found"
+                        ? "text-emerald-700"
+                        : "text-amber-700"
+                    }`}
+                  >
+                    {confirmationItem.lookupStatus === "found"
+                      ? confirmationItem.matchedBarcode &&
+                        confirmationItem.matchedBarcode !== scannedBarcode
+                        ? `Matched product database as ${confirmationItem.matchedBarcode}`
+                        : "Matched product database"
+                      : confirmationItem.lookupMessage || "Product not found in database"}
                   </p>
                 </div>
               </div>
@@ -1613,6 +2724,39 @@ function ScanScreen({
                   </p>
                 </div>
               </div>
+
+              {confirmationItem.nutrition &&
+                (confirmationNutritionFacts.length > 0 || confirmationItem.nutrition.nutriScore) && (
+                  <div className="mt-3 rounded-2xl bg-[#eef3ef] p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-[11px] font-bold uppercase tracking-[0.12em] text-[#6c756d]">
+                        {confirmationItem.nutrition.basis || "Nutrition"}
+                      </p>
+                      {confirmationItem.nutrition.nutriScore && (
+                        <span className="rounded-full bg-white px-2 py-1 text-[11px] font-bold text-[#173b2a]">
+                          Nutri-Score {confirmationItem.nutrition.nutriScore}
+                        </span>
+                      )}
+                    </div>
+                    {confirmationItem.nutrition.servingSize && (
+                      <p className="mt-1 text-xs font-semibold text-[#6c756d]">
+                        Serving {confirmationItem.nutrition.servingSize}
+                      </p>
+                    )}
+                    {confirmationNutritionFacts.length > 0 && (
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        {confirmationNutritionFacts.map((fact) => (
+                          <div key={fact.label} className="rounded-xl bg-white px-3 py-2">
+                            <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-[#6c756d]">
+                              {fact.label}
+                            </p>
+                            <p className="mt-1 text-sm font-bold">{fact.value}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
             </div>
 
             <div className="mt-4 grid grid-cols-[0.9fr_1.1fr] gap-3">
@@ -1645,6 +2789,7 @@ function ChatScreen({
   input,
   messages,
   pantryCount,
+  onCookRecipe,
   onInputChange,
   onSubmit,
   onPromptSelect,
@@ -1652,6 +2797,7 @@ function ChatScreen({
   input: string;
   messages: ChatMessage[];
   pantryCount: number;
+  onCookRecipe: (recipe: RecipeMatch) => void;
   onInputChange: (value: string) => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   onPromptSelect: (prompt: string) => void;
@@ -1696,7 +2842,7 @@ function ChatScreen({
         </div>
 
         {messages.map((message) => (
-          <ChatBubble key={message.id} message={message} />
+          <ChatBubble key={message.id} message={message} onCookRecipe={onCookRecipe} />
         ))}
       </section>
 
@@ -1711,7 +2857,7 @@ function ChatScreen({
             className="min-w-0 flex-1 bg-transparent text-sm font-semibold text-[#1b221d] outline-none placeholder:text-[#758078]"
             value={input}
             onChange={(event) => onInputChange(event.target.value)}
-            placeholder="Ask to cook, add, remove, or shop"
+            placeholder="Ask me anything"
           />
           <button
             className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#173b2a] text-white disabled:bg-[#b8c3bb]"
@@ -1727,7 +2873,13 @@ function ChatScreen({
   );
 }
 
-function ChatBubble({ message }: { message: ChatMessage }) {
+function ChatBubble({
+  message,
+  onCookRecipe,
+}: {
+  message: ChatMessage;
+  onCookRecipe: (recipe: RecipeMatch) => void;
+}) {
   const isUser = message.role === "user";
 
   return (
@@ -1782,6 +2934,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
                   label="Make now"
                   recipes={message.ready}
                   tone="green"
+                  onCookRecipe={onCookRecipe}
                 />
               )}
               {message.stretch && message.stretch.length > 0 && (
@@ -1789,6 +2942,7 @@ function ChatBubble({ message }: { message: ChatMessage }) {
                   label="Need 1-2 items"
                   recipes={message.stretch}
                   tone="amber"
+                  onCookRecipe={onCookRecipe}
                 />
               )}
             </div>
@@ -1889,10 +3043,12 @@ function ChatRecipeGroup({
   label,
   recipes,
   tone,
+  onCookRecipe,
 }: {
   label: string;
   recipes: AiRecommendation[];
   tone: "green" | "amber";
+  onCookRecipe: (recipe: RecipeMatch) => void;
 }) {
   const labelClass =
     tone === "green" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800";
@@ -1909,7 +3065,12 @@ function ChatRecipeGroup({
       </div>
       <div className="space-y-2">
         {recipes.map((recipe) => (
-          <ChatRecipeCard key={recipe.id} recipe={recipe} tone={tone} />
+          <ChatRecipeCard
+            key={recipe.id}
+            recipe={recipe}
+            tone={tone}
+            onCookRecipe={onCookRecipe}
+          />
         ))}
       </div>
     </div>
@@ -1919,9 +3080,11 @@ function ChatRecipeGroup({
 function ChatRecipeCard({
   recipe,
   tone,
+  onCookRecipe,
 }: {
   recipe: AiRecommendation;
   tone: "green" | "amber";
+  onCookRecipe: (recipe: RecipeMatch) => void;
 }) {
   const badgeClass =
     tone === "green" ? "bg-emerald-100 text-emerald-800" : "bg-amber-100 text-amber-800";
@@ -1937,9 +3100,19 @@ function ChatRecipeCard({
           <h3 className="text-sm font-bold leading-snug">{recipe.name}</h3>
           <p className="mt-1 text-xs font-semibold text-[#657066]">{recipe.highlight}</p>
         </div>
-        <span className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-bold ${badgeClass}`}>
-          {recipe.match}%
-        </span>
+        <div className="flex shrink-0 flex-col items-end gap-2">
+          <span className={`rounded-full px-2.5 py-1 text-[11px] font-bold ${badgeClass}`}>
+            {recipe.match}%
+          </span>
+          <button
+            className="flex h-8 items-center gap-1.5 rounded-full bg-[#173b2a] px-3 text-[11px] font-bold text-white shadow-sm"
+            type="button"
+            onClick={() => onCookRecipe(recipe)}
+          >
+            <ChefHat size={14} />
+            Cook
+          </button>
+        </div>
       </div>
 
       <div className="mt-3 flex flex-wrap gap-2 text-[11px] font-bold">
@@ -1959,33 +3132,44 @@ function ChatRecipeCard({
 
 function RecipeScreen({
   recipeMatches,
+  selectedRecipe,
+  onCookRecipe,
 }: {
-  recipeMatches: Array<Recipe & { available: string[]; missing: string[]; match: number }>;
+  recipeMatches: RecipeMatch[];
+  selectedRecipe: CookingRecipe | null;
+  onCookRecipe: (recipe: RecipeMatch) => void;
 }) {
   return (
     <div className="space-y-5">
-      <section className="rounded-[28px] bg-white p-4 shadow-sm ring-1 ring-black/5">
-        <div className="flex items-center gap-3">
-          <div className="grid h-11 w-11 place-items-center rounded-2xl bg-rose-100 text-rose-700">
-            <Flame size={21} />
+      {selectedRecipe ? (
+        <CookRecipePanel recipe={selectedRecipe} />
+      ) : (
+        <section className="rounded-[28px] bg-white p-4 shadow-sm ring-1 ring-black/5">
+          <div className="flex items-center gap-3">
+            <div className="grid h-11 w-11 place-items-center rounded-2xl bg-rose-100 text-rose-700">
+              <Flame size={21} />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-[#6c756d]">Cook from pantry</p>
+              <h2 className="text-2xl font-bold tracking-normal">Smart recipes</h2>
+            </div>
           </div>
-          <div>
-            <p className="text-sm font-semibold text-[#6c756d]">Cook from pantry</p>
-            <h2 className="text-2xl font-bold tracking-normal">Smart recipes</h2>
+          <div className="mt-4 grid grid-cols-3 gap-2">
+            <Metric label="Ready" value="3" light />
+            <Metric label="1 item" value="2" light />
+            <Metric label="2 items" value="2" light />
           </div>
-        </div>
-        <div className="mt-4 grid grid-cols-3 gap-2">
-          <Metric label="Ready" value="3" light />
-          <Metric label="1 item" value="2" light />
-          <Metric label="2 items" value="2" light />
-        </div>
-      </section>
+        </section>
+      )}
 
       <section>
-        <SectionTitle eyebrow="Suggested" title="Best matches" />
+        <SectionTitle
+          eyebrow={selectedRecipe ? "Suggested" : "Suggested"}
+          title={selectedRecipe ? "More matches" : "Best matches"}
+        />
         <div className="mt-3 space-y-3">
           {recipeMatches.map((recipe) => (
-            <RecipeCard key={recipe.id} recipe={recipe} />
+            <RecipeCard key={recipe.id} recipe={recipe} onCookRecipe={onCookRecipe} />
           ))}
         </div>
       </section>
@@ -1993,10 +3177,83 @@ function RecipeScreen({
   );
 }
 
+function CookRecipePanel({ recipe }: { recipe: CookingRecipe }) {
+  return (
+    <section className="rounded-[28px] bg-white p-4 shadow-sm ring-1 ring-black/5">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-[0.18em] text-[#6a756e]">
+            Cooking now
+          </p>
+          <h2 className="mt-2 text-2xl font-bold leading-tight tracking-normal">
+            {recipe.name}
+          </h2>
+          <p className="mt-2 text-sm font-semibold leading-5 text-[#657066]">
+            {recipe.highlight}
+          </p>
+        </div>
+        <span className="grid h-12 w-12 shrink-0 place-items-center rounded-2xl bg-[#173b2a] text-white">
+          <ChefHat size={22} />
+        </span>
+      </div>
+
+      <div className="mt-4 grid grid-cols-3 gap-2">
+        <Metric label="Time" value={recipe.time} light />
+        <Metric label="Match" value={`${recipe.match}%`} light />
+        <Metric label="Need" value={String(recipe.missing.length)} light />
+      </div>
+
+      <div className="mt-5 space-y-4">
+        <TagRow label="Use" values={recipe.ingredients} tone="green" />
+        {recipe.missing.length > 0 && (
+          <TagRow label="Pick up" values={recipe.missing} tone="amber" />
+        )}
+        <div>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.14em] text-[#6d776f]">
+            Prep
+          </p>
+          <div className="space-y-2">
+            {recipe.prepNotes.map((note) => (
+              <p
+                key={note}
+                className="rounded-[18px] bg-[#f4f7f4] px-3 py-2 text-xs font-semibold leading-5 text-[#4f5b53]"
+              >
+                {note}
+              </p>
+            ))}
+          </div>
+        </div>
+        <div>
+          <p className="mb-2 text-[11px] font-bold uppercase tracking-[0.14em] text-[#6d776f]">
+            Instructions
+          </p>
+          <div className="space-y-2">
+            {recipe.instructions.map((instruction, index) => (
+              <div
+                key={instruction}
+                className="flex gap-3 rounded-[18px] bg-[#f4f7f4] p-3"
+              >
+                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-white text-xs font-bold text-[#173b2a]">
+                  {index + 1}
+                </span>
+                <p className="text-sm font-semibold leading-5 text-[#2d3931]">
+                  {instruction}
+                </p>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 function RecipeCard({
   recipe,
+  onCookRecipe,
 }: {
-  recipe: Recipe & { available: string[]; missing: string[]; match: number };
+  recipe: RecipeMatch;
+  onCookRecipe: (recipe: RecipeMatch) => void;
 }) {
   return (
     <article className="rounded-[26px] bg-white p-4 shadow-sm ring-1 ring-black/5">
@@ -2013,9 +3270,13 @@ function RecipeCard({
           <h3 className="mt-3 text-lg font-bold leading-snug tracking-normal">{recipe.name}</h3>
           <p className="mt-1 text-sm font-semibold text-[#6b756d]">{recipe.highlight}</p>
         </div>
-        <button className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#173b2a] text-white">
+        <button
+          className="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-[#173b2a] text-white"
+          type="button"
+          onClick={() => onCookRecipe(recipe)}
+        >
           <ChevronRight size={19} />
-          <span className="sr-only">Open recipe</span>
+          <span className="sr-only">Cook {recipe.name}</span>
         </button>
       </div>
 
