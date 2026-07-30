@@ -15,7 +15,7 @@ type AuthRequestBody = {
 
 type SupabaseAuthPayload = {
   access_token?: string;
-  token_type?: string;
+  token_type?: Session["token_type"];
   expires_in?: number;
   expires_at?: number;
   refresh_token?: string;
